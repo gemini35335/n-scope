@@ -9,7 +9,7 @@ import re
 import pdfplumber
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 
 def select_folder():
@@ -17,9 +17,9 @@ def select_folder():
     root = tk.Tk()
     root.withdraw()  # Скрываем главное окно
     root.attributes('-topmost', True)  # Показываем поверх всех окон
-    
+
     folder_path = filedialog.askdirectory(title="Выберите папку с PDF отчетами")
-    
+
     root.destroy()
     return folder_path
 
@@ -32,39 +32,43 @@ def extract_vulnerability_data(pdf_path):
         'high': 0,
         'high_suspect': 0
     }
-    
+
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                tables = page.extract_tables()
-                for table in tables:
-                    for row in table:
-                        if not row or len(row) < 3:
-                            continue
-                        
-                        cell_text = str(row[0]) if row[0] else ''
-                        
-                        # Проверяем наличие заголовка "Уровень" чтобы понять что это нужная таблица
-                        if 'Уровень' in cell_text and 'Службы/ПО' in str(row[1]):
-                            continue  # Это заголовок таблицы
-                        
-                        # Извлекаем значения из колонок [1] и [2] (Службы/ПО и Узлы)
-                        col1_val = int(row[1]) if row[1] and row[1].isdigit() else 0
-                        col2_val = int(row[2]) if row[2] and row[2].isdigit() else 0
-                        
-                        # Ищем строки с нужными уровнями
-                        if 'Критический уровень' in cell_text and '(подозрение)' not in cell_text:
-                            data['critical'] = col1_val
-                        elif 'Критический уровень (подозрение)' in cell_text:
-                            data['critical_suspect'] = col1_val
-                        elif 'Высокий уровень' in cell_text and '(подозрение)' not in cell_text:
-                            data['high'] = col1_val
-                        elif 'Высокий уровень (подозрение)' in cell_text:
-                            data['high_suspect'] = col1_val
+                text = page.extract_text()
+                if not text:
+                    continue
+                
+                lines = text.split('\n')
+                for line in lines:
+                    # Критический уровень (без подозрения)
+                    if re.search(r'Критический\s+уровень\s+(?!\(подозрение\))', line, re.IGNORECASE):
+                        numbers = re.findall(r'\d+', line)
+                        if len(numbers) >= 1:
+                            data['critical'] = int(numbers[0])
+                    
+                    # Критический уровень (подозрение)
+                    elif re.search(r'Критический\s+уровень\s+\(подозрение\)', line, re.IGNORECASE):
+                        numbers = re.findall(r'\d+', line)
+                        if len(numbers) >= 1:
+                            data['critical_suspect'] = int(numbers[0])
+                    
+                    # Высокий уровень (без подозрения)
+                    elif re.search(r'Высокий\s+уровень\s+(?!\(подозрение\))', line, re.IGNORECASE):
+                        numbers = re.findall(r'\d+', line)
+                        if len(numbers) >= 1:
+                            data['high'] = int(numbers[0])
+                    
+                    # Высокий уровень (подозрение)
+                    elif re.search(r'Высокий\s+уровень\s+\(подозрение\)', line, re.IGNORECASE):
+                        numbers = re.findall(r'\d+', line)
+                        if len(numbers) >= 1:
+                            data['high_suspect'] = int(numbers[0])
+        
+        return data, None
     except Exception as e:
-        print(f"Ошибка при обработке {pdf_path}: {e}")
-    
-    return data
+        return None, str(e)
 
 
 def parse_filename(filename):
@@ -72,28 +76,28 @@ def parse_filename(filename):
     # Шаблон: ООО  Пример(10.1.2.0_24 Сегмент сетевого оборудования)_5.pdf
     pattern = r'(.+?)\(([\d\.]+)_([\d]+)\s+(.+?)\)_.*?\.pdf'
     match = re.match(pattern, filename)
-    
+
     if match:
         org_name = match.group(1).strip()
         ip_base = match.group(2)
         prefix = match.group(3)
         segment_name = match.group(4).strip()
-        
+
         # Формируем CIDR нотацию
         cidr = f"{ip_base}/{prefix}"
-        
+
         return {
             'org_name': org_name,
             'cidr': cidr,
             'segment_name': segment_name
         }
-    
+
     return None
 
 
-def generate_html_report(reports, output_path):
+def generate_html_report(reports, output_path, total_files, processed_files, errors):
     """Генерирует HTML отчет на основе извлеченных данных."""
-    
+
     # Группируем по организациям
     orgs = {}
     for report in reports:
@@ -104,7 +108,7 @@ def generate_html_report(reports, output_path):
                 'total_critical': 0,
                 'total_high': 0
             }
-        
+
         segment_data = {
             'cidr': report['cidr'],
             'segment_name': report['segment_name'],
@@ -113,11 +117,11 @@ def generate_html_report(reports, output_path):
             'high': report['data']['high'],
             'high_suspect': report['data']['high_suspect']
         }
-        
+
         orgs[org_name]['segments'].append(segment_data)
         orgs[org_name]['total_critical'] += report['data']['critical'] + report['data']['critical_suspect']
         orgs[org_name]['total_high'] += report['data']['high'] + report['data']['high_suspect']
-    
+
     html = """<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -148,24 +152,31 @@ def generate_html_report(reports, output_path):
             color: #4CAF50;
             margin-top: 0;
         }
-        .segment {
-            margin: 15px 0;
-            padding: 10px;
-            background: #f9f9f9;
-            border-left: 4px solid #4CAF50;
-        }
-        .total {
-            margin-top: 15px;
+        .summary {
+            background-color: #e7f3ff;
             padding: 15px;
-            background: #e8f5e9;
             border-radius: 5px;
-            font-weight: bold;
+            margin-bottom: 20px;
+            border-left: 4px solid #007bff;
         }
-        .critical {
-            color: #d32f2f;
+        .stats {
+            display: inline-block;
+            margin-right: 20px;
+            padding: 10px 15px;
+            background-color: #28a745;
+            color: white;
+            border-radius: 5px;
         }
-        .high {
-            color: #f57c00;
+        .error-report {
+            background-color: #ffe7e7;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+            border-left: 4px solid #dc3545;
+        }
+        .error-item {
+            color: #dc3545;
+            margin: 5px 0;
         }
         table {
             width: 100%;
@@ -173,7 +184,7 @@ def generate_html_report(reports, output_path):
             margin-top: 10px;
         }
         th, td {
-            padding: 8px;
+            padding: 10px;
             text-align: left;
             border-bottom: 1px solid #ddd;
         }
@@ -181,12 +192,48 @@ def generate_html_report(reports, output_path):
             background-color: #4CAF50;
             color: white;
         }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .total-row {
+            font-weight: bold;
+            background-color: #e9ecef !important;
+        }
+        .grand-total {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #fff3cd;
+            border-radius: 5px;
+            border-left: 4px solid #ffc107;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
-    <h1>Отчет по уязвимостям</h1>
-"""
+    <h1>📊 Отчет по уязвимостям</h1>
     
+    <div class="summary">
+        <span class="stats">✅ Обработано файлов: """ + str(processed_files) + """ из """ + str(total_files) + """</span>
+"""
+
+    if errors:
+        html += """
+        <div class="error-report">
+            <strong>⚠️ Ошибки при обработке:</strong><br>
+"""
+        for error in errors:
+            html += f'<div class="error-item">• {error}</div>\n'
+        html += """
+        </div>
+"""
+
+    html += """
+    </div>
+"""
+
+    grand_total_critical = 0
+    grand_total_high = 0
+
     for org_name, org_data in orgs.items():
         html += f"""
     <div class="org-section">
@@ -204,35 +251,41 @@ def generate_html_report(reports, output_path):
         for segment in org_data['segments']:
             crit_total = segment['critical'] + segment['critical_suspect']
             high_total = segment['high'] + segment['high_suspect']
-            
-            crit_detail = f"{segment['critical']} крит. + {segment['critical_suspect']} крит. подозр."
-            high_detail = f"{segment['high']} высок. + {segment['high_suspect']} выс. подозр."
-            
+
             html += f"""
                 <tr>
                     <td>{segment['cidr']} ({segment['segment_name']})</td>
-                    <td class="critical">{crit_total} ({crit_detail})</td>
-                    <td class="high">{high_total} ({high_detail})</td>
+                    <td>{crit_total}</td>
+                    <td>{high_total}</td>
                 </tr>
 """
-        
+
         html += f"""
+                <tr class="total-row">
+                    <td>Итого по {org_name}</td>
+                    <td>{org_data['total_critical']}</td>
+                    <td>{org_data['total_high']}</td>
+                </tr>
             </tbody>
         </table>
-        <div class="total">
-            Итого - {org_data['total_critical']} (крит) {org_data['total_high']} (высок)
-        </div>
     </div>
 """
-    
-    html += """
+        grand_total_critical += org_data['total_critical']
+        grand_total_high += org_data['total_high']
+
+    html += f"""
+    <div class="grand-total">
+        📈 Общий итог:<br>
+        Критических уязвимостей: {grand_total_critical}<br>
+        Высоких уязвимостей: {grand_total_high}
+    </div>
 </body>
 </html>
 """
-    
+
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html)
-    
+
     return output_path
 
 
@@ -240,56 +293,91 @@ def main():
     # Открываем диалог выбора папки
     print("Откройте папку с PDF отчетами...")
     folder_path = select_folder()
-    
+
     if not folder_path:
         print("Папка не выбрана. Выход.")
         return
-    
+
     script_dir = Path(folder_path)
-    
+
     # Находим все PDF файлы
     pdf_files = list(script_dir.glob('*.pdf'))
-    
-    if not pdf_files:
-        print("PDF файлы не найдены в текущей директории")
+    total_files = len(pdf_files)
+
+    if total_files == 0:
+        messagebox.showwarning("Внимание", "В выбранной папке не найдено PDF файлов.")
         return
-    
-    print(f"Найдено PDF файлов: {len(pdf_files)}")
-    
+
+    print(f"Найдено PDF файлов: {total_files}")
+
     reports = []
-    
+    errors = []
+    processed_files = 0
+
     for pdf_path in pdf_files:
         print(f"\nОбработка: {pdf_path.name}")
-        
+
         # Парсим имя файла
         file_info = parse_filename(pdf_path.name)
         if not file_info:
-            print(f"  Не удалось распарсить имя файла: {pdf_path.name}")
+            error_msg = f"Не удалось распарсить имя файла: {pdf_path.name}"
+            errors.append(error_msg)
+            print(f"  ⚠️ {error_msg}")
             continue
-        
+
         print(f"  Организация: {file_info['org_name']}")
         print(f"  Сегмент: {file_info['cidr']} ({file_info['segment_name']})")
-        
+
         # Извлекаем данные из PDF
-        vuln_data = extract_vulnerability_data(pdf_path)
-        
+        vuln_data, error = extract_vulnerability_data(pdf_path)
+
+        if error:
+            error_msg = f"Ошибка в обработке файла {pdf_path.name}: {error}"
+            errors.append(error_msg)
+            print(f"  ❌ {error_msg}")
+            continue
+
+        if vuln_data is None:
+            error_msg = f"Не удалось извлечь данные из файла: {pdf_path.name}"
+            errors.append(error_msg)
+            print(f"  ❌ {error_msg}")
+            continue
+
         print(f"  Критический: {vuln_data['critical']}")
         print(f"  Критический (подозрение): {vuln_data['critical_suspect']}")
         print(f"  Высокий: {vuln_data['high']}")
         print(f"  Высокий (подозрение): {vuln_data['high_suspect']}")
-        
+
         reports.append({
             'org_name': file_info['org_name'],
             'cidr': file_info['cidr'],
             'segment_name': file_info['segment_name'],
             'data': vuln_data
         })
-    
-    if reports:
+
+        processed_files += 1
+        print(f"  ✅ Успешно обработан")
+
+    if reports or errors:
         # Генерируем HTML отчет в той же папке
         output_path = script_dir / 'vulnerability_report.html'
-        generate_html_report(reports, output_path)
-        print(f"\n✓ HTML отчет создан: {output_path}")
+        generate_html_report(reports, output_path, total_files, processed_files, errors)
+        print(f"\n✅ Отчет успешно создан: {output_path}")
+        print(f"📊 Обработано файлов: {processed_files} из {total_files}")
+        
+        if errors:
+            print(f"\n⚠️ Ошибки при обработке:")
+            for error in errors:
+                print(f"  - {error}")
+        
+        # Открываем отчет в браузере
+        import webbrowser
+        webbrowser.open(str(output_path))
+        
+        messagebox.showinfo("Завершено", 
+                           f"Отчет успешно создан!\n\n"
+                           f"Обработано файлов: {processed_files} из {total_files}\n"
+                           f"Отчет сохранен: vulnerability_report.html")
     else:
         print("\nНет данных для генерации отчета")
 
