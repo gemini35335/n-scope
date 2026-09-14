@@ -8,6 +8,20 @@ import os
 import re
 import pdfplumber
 from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog
+
+
+def select_folder():
+    """Открывает диалоговое окно выбора папки."""
+    root = tk.Tk()
+    root.withdraw()  # Скрываем главное окно
+    root.attributes('-topmost', True)  # Показываем поверх всех окон
+    
+    folder_path = filedialog.askdirectory(title="Выберите папку с PDF отчетами")
+    
+    root.destroy()
+    return folder_path
 
 
 def extract_vulnerability_data(pdf_path):
@@ -223,8 +237,15 @@ def generate_html_report(reports, output_path):
 
 
 def main():
-    # Определяем рабочую директорию (где лежит скрипт или текущая)
-    script_dir = Path(__file__).parent.resolve()
+    # Открываем диалог выбора папки
+    print("Откройте папку с PDF отчетами...")
+    folder_path = select_folder()
+    
+    if not folder_path:
+        print("Папка не выбрана. Выход.")
+        return
+    
+    script_dir = Path(folder_path)
     
     # Находим все PDF файлы
     pdf_files = list(script_dir.glob('*.pdf'))
@@ -265,7 +286,7 @@ def main():
         })
     
     if reports:
-        # Генерируем HTML отчет
+        # Генерируем HTML отчет в той же папке
         output_path = script_dir / 'vulnerability_report.html'
         generate_html_report(reports, output_path)
         print(f"\n✓ HTML отчет создан: {output_path}")
